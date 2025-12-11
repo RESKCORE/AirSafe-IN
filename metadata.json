@@ -1,0 +1,5 @@
+{
+  "name": "AirSafe India",
+  "description": "A responsive air quality dashboard for Indian cities powered by Gemini, featuring real-time data visualization and an AI health copilot.",
+  "requestFramePermissions": []
+}
