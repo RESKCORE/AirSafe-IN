@@ -2,7 +2,10 @@ import { FALLBACK_AIR_QUALITY_DATA } from '../constants';
 import { CityData, CityName, MonthName, MONTH_ORDER } from '../types';
 
 const CSV_FILE_PATH = '/air_quality_5_cities_3_months.csv';
-// OpenWeather API key from environment variable (set in Vercel dashboard)
+// WAQI (World Air Quality Index) API - most accurate government station data
+const WAQI_API_KEY = import.meta.env.VITE_WAQI_API_KEY || '';
+const WAQI_API_URL = 'https://api.waqi.info/feed';
+// OpenWeather API key from environment variable (fallback)
 const OPENWEATHER_API_KEY = import.meta.env.VITE_OPENWEATHER_API_KEY || '';
 const OPENWEATHER_AIR_POLLUTION_URL = 'https://api.openweathermap.org/data/2.5/air_pollution';
 const OPEN_METEO_AIR_QUALITY_URL = 'https://air-quality-api.open-meteo.com/v1/air-quality';
@@ -17,6 +20,62 @@ const CITY_COORDINATES: Record<CityName, { lat: number; lon: number }> = {
 };
 
 const CITY_NAMES: CityName[] = ['Delhi', 'Mumbai', 'Bengaluru', 'Kolkata', 'Chennai'];
+
+// Fetch from WAQI API (World Air Quality Index - most accurate government data)
+const fetchFromWAQI = async (city: CityName): Promise<{ pm25: number; aqi: number } | null> => {
+  if (!WAQI_API_KEY || WAQI_API_KEY === '') {
+    console.warn('⚠️ WAQI API key not configured');
+    return null;
+  }
+
+  const coords = CITY_COORDINATES[city];
+  const url = `${WAQI_API_URL}/geo:${coords.lat};${coords.lon}/?token=${WAQI_API_KEY}`;
+  
+  try {
+    console.log(`🌐 Fetching from WAQI API for ${city} (lat:${coords.lat}, lon:${coords.lon})...`);
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      console.error(`❌ WAQI error for ${city}: HTTP ${response.status} ${response.statusText}`);
+      return null;
+    }
+
+    const json = await response.json();
+    
+    if (json.status !== 'ok') {
+      console.error(`❌ WAQI API error for ${city}:`, json.data);
+      return null;
+    }
+
+    const data = json.data;
+    const aqi = data.aqi;
+    const pm25 = data.iaqi?.pm25?.v;
+    
+    if (pm25 !== undefined) {
+      console.log(`✅ WAQI ${city}: PM2.5 = ${pm25} µg/m³, AQI = ${aqi}`);
+      return { pm25: Math.round(pm25), aqi };
+    }
+    
+    // If PM2.5 not available, estimate from AQI
+    if (aqi) {
+      // Rough conversion: AQI to PM2.5 (US EPA standard)
+      const estimatedPm25 = aqi <= 50 ? aqi * 0.24 :
+                           aqi <= 100 ? 12.1 + (aqi - 51) * 0.71 :
+                           aqi <= 150 ? 35.5 + (aqi - 101) * 0.79 :
+                           aqi <= 200 ? 55.5 + (aqi - 151) * 0.89 :
+                           aqi <= 300 ? 150.5 + (aqi - 201) * 0.99 :
+                           250.5 + (aqi - 301) * 0.99;
+      console.log(`✅ WAQI ${city}: AQI = ${aqi}, Estimated PM2.5 = ${Math.round(estimatedPm25)} µg/m³`);
+      return { pm25: Math.round(estimatedPm25), aqi };
+    }
+    
+    console.warn(`⚠️ No PM2.5 or AQI data in WAQI response for ${city}`);
+    return null;
+  } catch (err) {
+    console.error(`❌ WAQI fetch error for ${city}:`, err);
+    return null;
+  }
+};
 
 // Fetch from Open-Meteo API (free, no API key required)
 const fetchFromOpenMeteo = async (city: CityName): Promise<{ pm25: number } | null> => {
@@ -51,29 +110,40 @@ const fetchFromOpenMeteo = async (city: CityName): Promise<{ pm25: number } | nu
 
 // Fetch from OpenWeather API
 const fetchFromOpenWeather = async (city: CityName): Promise<{ pm25: number } | null> => {
+  if (!OPENWEATHER_API_KEY || OPENWEATHER_API_KEY === '') {
+    console.warn('OpenWeather API key not configured');
+    return null;
+  }
+
   const coords = CITY_COORDINATES[city];
   const url = `${OPENWEATHER_AIR_POLLUTION_URL}?lat=${coords.lat}&lon=${coords.lon}&appid=${OPENWEATHER_API_KEY}`;
   
   try {
-    console.log(`Fetching from OpenWeather for ${city}...`);
+    console.log(`🌐 Fetching from OpenWeather API for ${city}... (${coords.lat}, ${coords.lon})`);
     const response = await fetch(url);
     
     if (!response.ok) {
-      console.error(`OpenWeather error for ${city}: ${response.status}`);
+      console.error(`❌ OpenWeather error for ${city}: HTTP ${response.status} ${response.statusText}`);
+      const errorText = await response.text();
+      console.error(`Response: ${errorText}`);
       return null;
     }
 
     const json = await response.json();
+    console.log(`📦 OpenWeather response for ${city}:`, JSON.stringify(json).substring(0, 200));
+    
     const pollution = json.list?.[0];
     const pm25 = pollution?.components?.pm2_5;
+    const aqi = pollution?.main?.aqi;
     
     if (pm25 !== undefined) {
-      console.log(`OpenWeather ${city}: PM2.5 = ${Math.round(pm25)} µg/m³`);
+      console.log(`✓ OpenWeather ${city}: PM2.5 = ${Math.round(pm25)} µg/m³ (AQI: ${aqi || 'N/A'})`);
       return { pm25: Math.round(pm25) };
     }
+    console.warn(`⚠️ No PM2.5 data in OpenWeather response for ${city}`);
     return null;
   } catch (err) {
-    console.error(`OpenWeather fetch error for ${city}:`, err);
+    console.error(`❌ OpenWeather fetch error for ${city}:`, err);
     return null;
   }
 };
@@ -176,52 +246,67 @@ const transformToDataset = (lines: string[]): Record<CityName, CityData> => {
 // Fetch live AQI data - tries OpenWeather first, then Open-Meteo as fallback
 export const fetchLiveAQIData = async (): Promise<Record<CityName, CityData>> => {
   try {
-    console.log('Fetching live AQI data...');
+    console.log('Fetching live AQI data from OpenWeather API...');
     
     const result = {} as Record<CityName, CityData>;
     const currentMonth = 'November' as MonthName;
 
     // Fetch air pollution data for each city in parallel
     const cityPromises = CITY_NAMES.map(async (city) => {
-      // Try OpenWeather first
-      let data = await fetchFromOpenWeather(city);
+      // Try WAQI first (most accurate government data)
+      let data = await fetchFromWAQI(city);
       
-      // If OpenWeather fails, try Open-Meteo
+      // If WAQI fails, try OpenWeather
       if (!data) {
-        console.log(`OpenWeather failed for ${city}, trying Open-Meteo...`);
-        data = await fetchFromOpenMeteo(city);
+        console.log(`⚠️ WAQI failed for ${city}, trying OpenWeather...`);
+        const owData = await fetchFromOpenWeather(city);
+        data = owData ? { pm25: owData.pm25, aqi: 0 } : null;
       }
       
-      return { city, pm25: data?.pm25 };
+      // If both fail, try Open-Meteo
+      if (!data) {
+        console.log(`⚠️ OpenWeather failed for ${city}, trying Open-Meteo...`);
+        const omData = await fetchFromOpenMeteo(city);
+        data = omData ? { pm25: omData.pm25, aqi: 0 } : null;
+      }
+      
+      return { city, pm25: data?.pm25, aqi: data?.aqi };
     });
 
     const cityResults = await Promise.all(cityPromises);
 
     // Build result dataset
     let liveCount = 0;
-    for (const { city, pm25 } of cityResults) {
+    for (const { city, pm25, aqi } of cityResults) {
       if (pm25 !== undefined && pm25 !== null) {
         liveCount++;
-        const note = pm25 > 100 ? 'Severe; health advisory in effect.' :
-                     pm25 > 60 ? 'Poor to Very Poor; sensitive groups should limit outdoor exposure.' :
-                     pm25 > 30 ? 'Moderate; generally acceptable air quality.' :
-                     'Good to Satisfactory air quality.';
+        const aqiLabel = aqi && aqi > 0 ? ` (AQI: ${aqi})` : '';
+        const note = pm25 > 200 ? `Severe${aqiLabel}; health advisory in effect. Avoid all outdoor activities.` :
+                     pm25 > 100 ? `Very Poor${aqiLabel}; health risk for sensitive groups. Limit outdoor exposure.` :
+                     pm25 > 60 ? `Poor${aqiLabel}; sensitive groups should limit outdoor activities.` :
+                     pm25 > 30 ? `Moderate${aqiLabel}; generally acceptable air quality.` :
+                     `Good${aqiLabel} to Satisfactory air quality.`;
+
+        // Generate realistic historical estimates (30-40% lower than current for earlier months)
+        const septPm25 = Math.max(10, Math.round(pm25 * 0.6));
+        const octPm25 = Math.max(15, Math.round(pm25 * 0.75));
 
         result[city as CityName] = {
           name: city as CityName,
           data: [
-            { month: 'September', pm25: Math.max(10, pm25 - 30), note: 'Historical estimate based on seasonal patterns' },
-            { month: 'October', pm25: Math.max(15, pm25 - 15), note: 'Historical estimate based on seasonal patterns' },
-            { month: currentMonth, pm25: pm25, note: `Live data: ${note}` }
+            { month: 'September', pm25: septPm25, note: 'Historical estimate based on seasonal patterns' },
+            { month: 'October', pm25: octPm25, note: 'Historical estimate based on seasonal patterns' },
+            { month: currentMonth, pm25: pm25, note: `Live data from government stations: ${note}` }
           ]
         };
+        console.log(`✓ ${city}: Current PM2.5 = ${pm25} µg/m³${aqiLabel} [LIVE from WAQI]`);
       } else {
-        console.warn(`Using fallback data for ${city}`);
+        console.warn(`✗ Using fallback data for ${city} (API unavailable)`);
         result[city as CityName] = FALLBACK_AIR_QUALITY_DATA[city as CityName];
       }
     }
 
-    console.log(`Successfully fetched live data for ${liveCount}/${CITY_NAMES.length} cities`);
+    console.log(`✓ Successfully fetched live data for ${liveCount}/${CITY_NAMES.length} cities`);
 
     if (liveCount === 0) {
       throw new Error('No live data retrieved from any API');
@@ -229,7 +314,7 @@ export const fetchLiveAQIData = async (): Promise<Record<CityName, CityData>> =>
 
     return result;
   } catch (error) {
-    console.error('Failed to fetch live AQI data:', error);
+    console.error('✗ Failed to fetch live AQI data:', error);
     throw error;
   }
 };

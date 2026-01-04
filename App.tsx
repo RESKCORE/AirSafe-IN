@@ -53,37 +53,44 @@ const App: React.FC = () => {
   const [currentView, setCurrentView] = useState<ViewState>('overview');
   const [selectedCity, setSelectedCity] = useState<CityName>('Delhi');
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [airQualityData, setAirQualityData] = useState<Record<CityName, CityData>>(FALLBACK_AIR_QUALITY_DATA);
+  const [airQualityData, setAirQualityData] = useState<Record<CityName, CityData> | null>(null);
   const [isDataLoading, setIsDataLoading] = useState(true);
   const [dataError, setDataError] = useState<string | null>(null);
 
-  const cities = useMemo(() => Object.keys(airQualityData) as CityName[], [airQualityData]);
-  const systemInstruction = useMemo(() => buildSystemInstruction(airQualityData), [airQualityData]);
+  const cities = useMemo(() => airQualityData ? Object.keys(airQualityData) as CityName[] : [], [airQualityData]);
+  const systemInstruction = useMemo(() => buildSystemInstruction(airQualityData || FALLBACK_AIR_QUALITY_DATA), [airQualityData]);
 
-  const selectedCityData = airQualityData[selectedCity];
+  const selectedCityData = airQualityData?.[selectedCity];
   const latestReading = selectedCityData?.data[selectedCityData.data.length - 1];
   const previousReading = selectedCityData?.data[selectedCityData.data.length - 2];
 
   useEffect(() => {
     let isMounted = true;
+    let isAborted = false;
 
     const loadData = async () => {
+      if (isAborted) return;
+      
       try {
-        console.log('Starting data fetch...');
+        console.log('🔄 Starting data fetch...');
         const dataset = await fetchAirQualityData();
-        console.log('Data fetched successfully:', dataset);
-        if (isMounted) {
-          setAirQualityData(dataset);
+        console.log('✅ Data fetched successfully:', dataset);
+        console.log('📊 Delhi PM2.5:', dataset.Delhi?.data[dataset.Delhi?.data.length - 1]?.pm25);
+        
+        if (isMounted && !isAborted) {
+          console.log('🔄 Updating state with live data...');
+          setIsDataLoading(false);
           setDataError(null);
+          setAirQualityData(dataset);
+          console.log('✅ State updated - isDataLoading:', false, 'data set:', !!dataset);
         }
       } catch (error) {
-        console.error('Failed to load data:', error);
-        if (isMounted) {
-          setDataError('Unable to fetch live data. Showing historical values.');
-        }
-      } finally {
-        if (isMounted) {
+        console.error('❌ Failed to load data:', error);
+        if (isMounted && !isAborted) {
           setIsDataLoading(false);
+          setDataError('Unable to fetch live data. Showing historical values.');
+          setAirQualityData(FALLBACK_AIR_QUALITY_DATA);
+          console.log('⚠️ Using fallback data due to error');
         }
       }
     };
@@ -92,11 +99,12 @@ const App: React.FC = () => {
 
     return () => {
       isMounted = false;
+      isAborted = true;
     };
   }, []);
 
   useEffect(() => {
-    if (!airQualityData[selectedCity]) {
+    if (airQualityData && !airQualityData[selectedCity]) {
       const [firstCity] = Object.keys(airQualityData) as CityName[];
       if (firstCity) {
         setSelectedCity(firstCity);
@@ -105,6 +113,7 @@ const App: React.FC = () => {
   }, [airQualityData, selectedCity]);
 
   const sortedCitiesByPM = useMemo(() => {
+    if (!airQualityData) return [];
     return Object.values(airQualityData)
       .map((city) => {
         const last = city.data[city.data.length - 1];
@@ -258,7 +267,20 @@ const App: React.FC = () => {
     </header>
   );
 
-  const renderOverview = () => (
+  const renderOverview = () => {
+    // Show loading state while data is null
+    if (!airQualityData) {
+      return (
+        <div className="flex items-center justify-center min-h-[400px]">
+          <div className="text-center space-y-4">
+            <Loader2 size={48} className="animate-spin text-emerald-500 mx-auto" />
+            <p className="text-emerald-600 font-medium">Loading live air quality data...</p>
+          </div>
+        </div>
+      );
+    }
+
+    return (
     <div className="space-y-6">
       <div className="rounded-3xl border border-emerald-100 bg-white/80 p-6 shadow-sm backdrop-blur">
         <div className="flex flex-col gap-6 md:flex-row md:items-center md:justify-between">
@@ -456,7 +478,8 @@ const App: React.FC = () => {
         </CardContent>
       </Card>
     </div>
-  );
+    );
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-emerald-50 via-white to-emerald-100 text-slate-800">
